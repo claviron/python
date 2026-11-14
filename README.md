@@ -62,6 +62,7 @@ Hosts that supply their own site registry can select `backend` and call
 
 ```yaml
 # python.yaml
+name: app                             # its name in the application manager
 target: app:app
 module_path: apps/python
 venv: .venv
@@ -69,6 +70,8 @@ env:
   APP_SECRET_KEY: ${APP_SECRET_KEY}   # expanded from the host's environment and env files
   APP_DEBUG: "0"
 # env_file: config/app.env            # further values, with deployment variants
+# frameworks: [django]                # shown by management clients
+# icon: django                        # a symbolic icon code, never a path
 ```
 
 ```yaml
@@ -83,6 +86,13 @@ one environment. A second application runs in its own process and joins over
 Orbit, which is what the `gufi` runner does. An interpreter does not change its
 environment, so a changed `python.yaml` takes a restart. Each worker boots its
 own interpreter; a master boots none.
+
+Where the host registers Claviron's application manager, the application is
+listed and controlled as `python:<name>`, with request mode `asgi`. Stopping
+it runs ASGI lifespan shutdown, and its routes answer 503 until it starts
+again; starting it boots it from the `python.yaml` published at that moment.
+Its modules stay imported in the interpreter, so a restart runs a new lifespan
+with the code already loaded: changed code takes a new worker.
 
 The application's `os.environ` is its own: the values `env` and `env_file`
 declare, beside only the runtime essentials the host keeps, such as `PATH` and
