@@ -8,7 +8,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex, Weak, mpsc};
 use std::thread::{self, JoinHandle};
 
 use bytes::Bytes;
@@ -314,6 +314,7 @@ impl RunningPythonApplication {
     }
 
     pub fn shutdown(mut self) -> Result<()> {
+        self.commands.retire_sessions();
         let _ = self.commands.send(ApplicationCommand::Shutdown);
         self.join()
     }
@@ -328,6 +329,7 @@ impl RunningPythonApplication {
 
 impl Drop for RunningPythonApplication {
     fn drop(&mut self) {
+        self.commands.retire_sessions();
         let _ = self.commands.send(ApplicationCommand::Shutdown);
         let _ = self.join();
     }
@@ -339,6 +341,13 @@ pub struct PythonApplicationHandle {
 }
 
 impl PythonApplicationHandle {
+    /// The process is going away: every open WebSocket and WebTransport
+    /// stream hears it (1001), and its application `websocket.disconnect`.
+    /// Requests and the application keep running until they finish.
+    pub fn retire_sessions(&self) {
+        self.commands.retire_sessions();
+    }
+
     /// Hand one request to the application and wait for its answer.
     ///
     /// Awaited, not blocked on: the reply comes back on a oneshot the Python
@@ -404,19 +413,38 @@ impl PythonApplicationHandle {
         let id = EXCHANGE_IDS.fetch_add(1, Ordering::Relaxed);
         let shared = Arc::new(Inbound::default());
         let (outbound_tx, outbound) = chunks::channel(1);
+        {
+            let mut sessions =
+                self.commands.sessions.lock().expect("python sessions lock");
+            if sessions.retiring {
+                shared.retire();
+            }
+            sessions.live.insert(id, Arc::downgrade(&shared));
+        }
         let ends = WebSocketEnds {
             id,
             transport,
             decision,
             inbound: Arc::clone(&shared),
             outbound: outbound_tx,
+            sessions: Arc::clone(&self.commands.sessions),
         };
-        self.commands
+        if self
+            .commands
             .send(ApplicationCommand::WebSocket {
                 request: Box::new(request),
                 ends,
             })
-            .map_err(|_| Error::ApplicationStopped)?;
+            .is_err()
+        {
+            self.commands
+                .sessions
+                .lock()
+                .expect("python sessions lock")
+                .live
+                .remove(&id);
+            return Err(Error::ApplicationStopped);
+        }
         let inbound =
             WebSocketInbound { id, shared, commands: self.commands.clone() };
         Ok(WebSocketSession { decision: decided, inbound, outbound })
@@ -438,9 +466,41 @@ struct Commands {
     bell: Arc<UnixStream>,
     armed: Arc<AtomicBool>,
     accepting: Arc<Mutex<bool>>,
+    sessions: Arc<Mutex<Sessions>>,
+}
+
+/// The message sessions open in the application, so that a retiring process
+/// can tell each one its client is going away rather than wait for clients
+/// that do not know.
+#[derive(Default)]
+struct Sessions {
+    /// The process is going away: a session opened now starts retired.
+    retiring: bool,
+    live: HashMap<u64, Weak<Inbound>>,
 }
 
 impl Commands {
+    /// Tell every open message session its client is going away (1001), and
+    /// every session opened from now on. Each application hears
+    /// `websocket.disconnect` and closes with 1001 when it returns.
+    fn retire_sessions(&self) {
+        let live: Vec<(u64, Arc<Inbound>)> = {
+            let mut sessions =
+                self.sessions.lock().expect("python sessions lock");
+            sessions.retiring = true;
+            sessions
+                .live
+                .iter()
+                .filter_map(|(id, inbound)| Some((*id, inbound.upgrade()?)))
+                .collect()
+        };
+        for (id, inbound) in live {
+            if inbound.retire() {
+                let _ = self.send(ApplicationCommand::Ready(id));
+            }
+        }
+    }
+
     fn send(
         &self,
         command: ApplicationCommand,
@@ -498,6 +558,7 @@ fn commands() -> Result<(Commands, Doorbell)> {
             bell: Arc::new(write),
             armed: Arc::clone(&armed),
             accepting: Arc::new(Mutex::new(true)),
+            sessions: Arc::new(Mutex::new(Sessions::default())),
         },
         Doorbell { queue: receiver, bell: read, armed },
     ))
@@ -564,6 +625,7 @@ struct WebSocketEnds {
     decision: oneshot::Sender<WebSocketDecision>,
     inbound: Arc<Inbound>,
     outbound: chunks::Sender<Message>,
+    sessions: Arc<Mutex<Sessions>>,
 }
 
 /// The client's messages waiting for the application.
@@ -589,6 +651,19 @@ struct InboundState {
     waiting: bool,
     /// The application is gone; nothing more is worth queueing.
     abandoned: bool,
+    /// The process is going away: the client is told 1001, not 1006.
+    retiring: bool,
+}
+
+impl Inbound {
+    /// Mark the session retired; `true` when the application is waiting and
+    /// must be rung.
+    fn retire(&self) -> bool {
+        let mut state = self.state.lock().unwrap();
+        state.closed = true;
+        state.retiring = true;
+        std::mem::take(&mut state.waiting)
+    }
 }
 
 /// Where the client's messages go, held by the ingress.
@@ -1257,6 +1332,7 @@ struct WebSocketExchange {
     decision: Mutex<Option<oneshot::Sender<WebSocketDecision>>>,
     inbound: Arc<Inbound>,
     outbound: Mutex<Option<chunks::Sender<Message>>>,
+    sessions: Arc<Mutex<Sessions>>,
 }
 
 impl WebSocketExchange {
@@ -1271,6 +1347,7 @@ impl WebSocketExchange {
             decision: Mutex::new(Some(ends.decision)),
             inbound: ends.inbound,
             outbound: Mutex::new(Some(ends.outbound)),
+            sessions: ends.sessions,
         }
     }
 
@@ -1283,6 +1360,11 @@ impl WebSocketExchange {
     fn abandon(&self) {
         self.inbound.state.lock().unwrap().abandoned = true;
         self.inbound.room.notify_waiters();
+        self.sessions
+            .lock()
+            .expect("python sessions lock")
+            .live
+            .remove(&self.id);
     }
 }
 
@@ -1422,7 +1504,8 @@ impl WebSocketExchange {
             }
             None => {
                 event.set_item("type", "websocket.disconnect")?;
-                event.set_item("code", 1006)?;
+                let retiring = self.inbound.state.lock().unwrap().retiring;
+                event.set_item("code", if retiring { 1001 } else { 1006 })?;
             }
         }
         Ok(Some(event.into_any().unbind()))
@@ -1488,13 +1571,30 @@ impl WebSocketExchange {
         message: String,
     ) {
         tracing::debug!("🐍 WebSocket application failed: {message}");
-        self.finish();
-    }
-
-    /// The application returned.
-    fn finish(&self) {
         self.refuse_if_undecided();
         self.outbound.lock().unwrap().take();
+        self.abandon();
+    }
+
+    /// The application returned. In a retiring process the client hears 1001
+    /// Going Away; otherwise an unclosed end closes with 1011 at the edge.
+    fn finish(&self) {
+        self.refuse_if_undecided();
+        let outbound = self.outbound.lock().unwrap().take();
+        let retiring = self.inbound.state.lock().unwrap().retiring;
+        if let Some(outbound) = outbound
+            && retiring
+        {
+            let going_away =
+                Message::Close { code: 1001, reason: String::new() };
+            if let Err(chunks::error::TrySendError::Full(message)) =
+                outbound.try_send(going_away)
+            {
+                pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
+                    let _ = send_to_client(outbound, message).await;
+                });
+            }
+        }
         self.abandon();
     }
 }

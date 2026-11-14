@@ -446,6 +446,7 @@ fn fixes_disconnect_websocket_send_and_handshake_report_oserror() {
                 decision,
                 inbound: Arc::new(Inbound::default()),
                 outbound,
+                sessions: Arc::new(Mutex::new(Sessions::default())),
             },
         );
         (exchange, decided, received)
@@ -504,4 +505,48 @@ async fn fixes_disconnect_controls_preserve_successful_http_fin() {
             );
         }
     }
+}
+
+#[tokio::test]
+async fn a_retiring_process_tells_open_and_new_sessions_going_away() {
+    crate::interpreter::initialize(None).unwrap();
+    let (commands, doorbell) = commands().unwrap();
+    let handle = PythonApplicationHandle { commands };
+    let open = |handle: &PythonApplicationHandle| {
+        let session = handle
+            .handle_message_session(
+                fixes_request(),
+                MessageTransport::WebSocket,
+            )
+            .unwrap();
+        let Ok(ApplicationCommand::WebSocket { request, ends }) =
+            doorbell.queue.try_recv()
+        else {
+            panic!("the session reached the application");
+        };
+        (session, WebSocketExchange::new(*request, ends))
+    };
+    let disconnect_code = |exchange: &WebSocketExchange| {
+        Python::attach(|py| {
+            let event = exchange.try_receive(py).unwrap().expect("an event");
+            let event = event.bind(py);
+            assert_eq!(
+                event.get_item("type").unwrap().extract::<String>().unwrap(),
+                "websocket.disconnect"
+            );
+            event.get_item("code").unwrap().extract::<u16>().unwrap()
+        })
+    };
+
+    let (mut session, exchange) = open(&handle);
+    handle.retire_sessions();
+    assert_eq!(disconnect_code(&exchange), 1001);
+    exchange.finish();
+    assert_eq!(
+        session.outbound.recv().await,
+        Some(Message::Close { code: 1001, reason: String::new() })
+    );
+
+    let (_late, exchange) = open(&handle);
+    assert_eq!(disconnect_code(&exchange), 1001);
 }

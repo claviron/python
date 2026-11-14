@@ -108,6 +108,12 @@ goes to the application when the host's transport allows `h1.upgrade`, and is
 refused with 403 otherwise. WebSocket over HTTP/2 or HTTP/3 is not served from
 a route yet.
 
+When the process begins to go away, or the application is stopped, every open
+WebSocket and WebTransport stream is retired: the application receives
+`websocket.disconnect` with code 1001, and when it returns without closing,
+the client is sent a 1001 Going Away close. Nothing is cancelled; a stream
+ends because both of its sides were told, not because a timeout ran out.
+
 With the `webtransport` feature, a route names the paths a WebTransport session
 may open on, under its mount, and the host's transport allows `h3.webtransport`:
 

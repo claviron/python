@@ -120,6 +120,9 @@ pub(crate) struct PythonService {
     control: Mutex<Control>,
     /// One boot, start, stop, restart or finalization at a time.
     commands: tokio::sync::Mutex<()>,
+    /// Retires the running application's sessions when the process begins to
+    /// go away, before its listeners wait for their connections.
+    retire: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl PythonService {
@@ -148,6 +151,20 @@ impl PythonService {
         control.starting = false;
         match booted {
             Ok(running) => {
+                let sessions = running.handle();
+                let shutdown = state.shutdown_token();
+                let retire = tokio::spawn(async move {
+                    shutdown.cancelled().await;
+                    sessions.retire_sessions();
+                });
+                if let Some(previous) = self
+                    .retire
+                    .lock()
+                    .expect("python retire lock")
+                    .replace(retire)
+                {
+                    previous.abort();
+                }
                 *self.handle.write().expect("python handle lock") =
                     Some(running.handle());
                 *self.running.lock().expect("python owner lock") =
@@ -166,6 +183,11 @@ impl PythonService {
     /// Stop routing to the application, then run its lifespan shutdown.
     async fn unload(&self) -> Result<(), String> {
         *self.handle.write().expect("python handle lock") = None;
+        if let Some(retire) =
+            self.retire.lock().expect("python retire lock").take()
+        {
+            retire.abort();
+        }
         let running = self.running.lock().expect("python owner lock").take();
         let Some(running) = running else {
             return Ok(());
@@ -258,6 +280,7 @@ pub fn register(state: &AppState) -> registry::Result<()> {
             last_error: None,
         }),
         commands: tokio::sync::Mutex::new(()),
+        retire: Mutex::new(None),
     });
     #[cfg(feature = "webtransport")]
     let handle = service.handle();
