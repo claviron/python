@@ -142,7 +142,7 @@ impl PythonService {
         let id = config.id()?;
         {
             let mut control = self.control.lock().expect("python control lock");
-            control.booted = Some((id, config.description()));
+            control.booted = Some((id.clone(), config.description()));
             control.starting = true;
             control.enabled = true;
         }
@@ -171,9 +171,16 @@ impl PythonService {
                     Some(running);
                 control.generation += 1;
                 control.last_error = None;
+                tracing::info!(
+                    application = %id,
+                    target = %config.target,
+                    generation = control.generation,
+                    "🐍 Python application started"
+                );
                 Ok(())
             }
             Err(error) => {
+                tracing::warn!(application = %id, %error, "🐍 Python application failed to start");
                 control.last_error = Some(error.clone());
                 Err(error)
             }
@@ -199,8 +206,22 @@ impl PythonService {
             .and_then(|result| result.map_err(|error| error.to_string()));
         let mut control = self.control.lock().expect("python control lock");
         control.stopping = false;
-        if let Err(error) = &stopped {
-            control.last_error = Some(error.clone());
+        // A running application was booted, so it has its identity.
+        let application = control.booted.as_ref().map(|(id, _)| id);
+        match &stopped {
+            Ok(()) => tracing::info!(
+                application = application.map(tracing::field::display),
+                generation = control.generation,
+                "🐍 Python application stopped"
+            ),
+            Err(error) => {
+                tracing::warn!(
+                    application = application.map(tracing::field::display),
+                    %error,
+                    "🐍 Python application failed to stop"
+                );
+                control.last_error = Some(error.clone());
+            }
         }
         stopped
     }
