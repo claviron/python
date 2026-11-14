@@ -161,16 +161,42 @@ pub fn request_scope(parts: &http::request::Parts) -> HttpRequest {
             .into_owned(),
         raw_path: parts.uri.path().as_bytes().to_vec(),
         query_string: parts.uri.query().unwrap_or_default().as_bytes().to_vec(),
-        headers: parts
-            .headers
-            .iter()
-            .map(|(name, value)| {
-                (name.as_str().as_bytes().to_vec(), value.as_bytes().to_vec())
-            })
-            .collect(),
+        headers: scope_headers(parts),
         client: origin.client,
         server: origin.server,
     }
+}
+
+/// The request's headers as ASGI lists them. HTTP/2 and HTTP/3 name the host
+/// in `:authority`, not in a `Host` header; ASGI puts the request's authority
+/// first as `host`, in place of any `host` the client also sent, so an
+/// application reads the name the client asked for on every version rather
+/// than falling back to the server address. The authority is the one the
+/// edge accepted: Claviron's own selection between the target and `Host`.
+fn scope_headers(parts: &http::request::Parts) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let authority =
+        claviron::http::authority::RequestAuthority::from_parts(parts)
+            .ok()
+            .flatten();
+    let mut headers = Vec::with_capacity(parts.headers.len() + 1);
+    if let Some(authority) = &authority {
+        headers.push((
+            b"host".to_vec(),
+            authority.authority().as_str().as_bytes().to_vec(),
+        ));
+    }
+    headers.extend(
+        parts
+            .headers
+            .iter()
+            .filter(|(name, _)| {
+                authority.is_none() || *name != http::header::HOST
+            })
+            .map(|(name, value)| {
+                (name.as_str().as_bytes().to_vec(), value.as_bytes().to_vec())
+            }),
+    );
+    headers
 }
 
 fn response_from_asgi(

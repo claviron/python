@@ -63,3 +63,43 @@ async fn fixes_asgi_framing_header_is_ignored_without_losing_application_headers
         .is_err()
     );
 }
+
+#[test]
+fn every_http_version_reaches_the_application_with_its_host_first() {
+    let host = |version, uri: &str, headers: &[(&str, &str)]| {
+        let mut request = Request::builder().version(version).uri(uri);
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        let (parts, ()) = request.body(()).unwrap().into_parts();
+        request_scope(&parts).headers
+    };
+    let expected = |rest: &[(&str, &str)]| {
+        std::iter::once(("host", "stoa.example.com"))
+            .chain(rest.iter().copied())
+            .map(|(name, value)| {
+                (name.as_bytes().to_vec(), value.as_bytes().to_vec())
+            })
+            .collect::<Vec<_>>()
+    };
+    // HTTP/2 and HTTP/3 carry :authority in the target and no Host header.
+    for version in [http::Version::HTTP_2, http::Version::HTTP_3] {
+        assert_eq!(
+            host(
+                version,
+                "https://stoa.example.com/path",
+                &[("accept", "text/html")]
+            ),
+            expected(&[("accept", "text/html")])
+        );
+    }
+    // HTTP/1.1 in origin form names its host only in the header.
+    assert_eq!(
+        host(
+            http::Version::HTTP_11,
+            "/path",
+            &[("accept", "text/html"), ("host", "stoa.example.com")]
+        ),
+        expected(&[("accept", "text/html")])
+    );
+}
