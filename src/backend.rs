@@ -20,12 +20,12 @@
 use std::sync::Arc;
 
 use claviron::http::{RouteBody, ServiceResult, err_status};
-use claviron_pipeline::factory::{BackendContext, BackendPlacement, factory};
-use claviron_pipeline::{
+use claviron::pipeline::factory::{BackendContext, BackendPlacement, factory};
+use claviron::pipeline::{
     BackendContract, BackendHandler, BackendIdentity, BackendReply,
     DispatchCall, DispatchStep, HostContext, SiteRegistry,
 };
-use claviron_transport::owner::RequestBody;
+use claviron::transport::owner::RequestBody;
 use http::{Request, StatusCode};
 use serde::Deserialize;
 use tower_service::Service;
@@ -60,7 +60,7 @@ pub(crate) struct Route {
 /// A scope's `python:` declaration, decoded. `None` when it declares none.
 #[cfg(feature = "webtransport")]
 pub(crate) fn declared(
-    scope: &claviron_pipeline::Site
+    scope: &claviron::pipeline::Site
 ) -> Result<Option<Route>, serde_yaml::Error> {
     match scope.directive("python") {
         None => Ok(None),

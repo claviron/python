@@ -1,6 +1,6 @@
 //! A message session, whichever door it came through.
 //!
-//! The protocol is the transport's (`claviron_transport::websocket`): on a
+//! The protocol is the transport's (`claviron::transport::websocket`): on a
 //! connection this process holds it answers the handshake, joins fragments and
 //! answers pings; over Orbit the edge has done that already. Either way whole
 //! [`Message`]s come out. What is Python's is the decision — the ASGI application
@@ -13,9 +13,9 @@ use std::sync::{Arc, RwLock};
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
-use claviron_transport::owner::AppRequest;
-pub use claviron_transport::websocket::{DEFAULT_MESSAGE_LIMIT, Message};
-use claviron_transport::websocket::{Deliver, SocketKind, accept, attempt};
+use claviron::transport::owner::AppRequest;
+pub use claviron::transport::websocket::{DEFAULT_MESSAGE_LIMIT, Message};
+use claviron::transport::websocket::{Deliver, SocketKind, accept, attempt};
 use http::{Request, StatusCode};
 
 use crate::asgi::{

@@ -115,7 +115,7 @@ impl Endpoint {
     /// route's removal or masking; such a binding must not admit.
     fn still_declared(
         &self,
-        host: &claviron_pipeline::Site,
+        host: &claviron::pipeline::Site,
     ) -> bool {
         let selected =
             host.routes.find(&self.path).map(|route| &**route).unwrap_or(host);
