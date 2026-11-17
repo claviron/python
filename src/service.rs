@@ -277,6 +277,15 @@ async fn boot(
         .read_program_environment(&config.env_file, config.env.clone())
         .map_err(|error| format!("{CONFIG_FILE} env: {error}"))?;
     application = application.environment(environment.as_ref().clone());
+    // Where the host registered the fleet's Orbitals; a host without them
+    // gets no `claviron.orbital`.
+    if let Some(orbitals) = state
+        .registry_ref()
+        .resolve::<claviron::orbit::OrbitalsProvider>()
+        .and_then(|provider| provider.handle())
+    {
+        application = application.orbitals(orbitals);
+    }
     // Booting waits for ASGI lifespan startup; not on an async reactor.
     tokio::task::spawn_blocking(move || application.boot())
         .await

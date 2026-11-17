@@ -157,6 +157,7 @@ pub struct PythonApplication {
     environment: Arc<HashMap<String, String>>,
     invocations: Option<Arc<InvocationRouter>>,
     counters: Option<Arc<claviron::orbit::Counter>>,
+    orbitals: Option<Arc<claviron::orbit::Orbitals>>,
     #[cfg(feature = "broadcast")]
     broadcast: Option<crate::broadcast::Publisher>,
     #[cfg(feature = "django")]
@@ -172,6 +173,7 @@ impl PythonApplication {
             environment: Arc::default(),
             invocations: None,
             counters: None,
+            orbitals: None,
             #[cfg(feature = "broadcast")]
             broadcast: None,
             #[cfg(feature = "django")]
@@ -252,6 +254,16 @@ impl PythonApplication {
         table: Arc<claviron::orbit::Counter>,
     ) -> Self {
         self.counters = Some(table);
+        self
+    }
+
+    /// The fleet's Orbitals table, as `claviron.orbital`. A wait parked on
+    /// one ends when the running application is retired or shut down.
+    pub fn orbitals(
+        mut self,
+        table: Arc<claviron::orbit::Orbitals>,
+    ) -> Self {
+        self.orbitals = Some(table);
         self
     }
 
@@ -467,6 +479,9 @@ struct Commands {
     armed: Arc<AtomicBool>,
     accepting: Arc<Mutex<bool>>,
     sessions: Arc<Mutex<Sessions>>,
+    /// The waits the application is parked in on an Orbital, which the same
+    /// stop that retires its sessions ends.
+    waits: Arc<crate::orbital::Waits>,
 }
 
 /// The message sessions open in the application, so that a retiring process
@@ -499,6 +514,7 @@ impl Commands {
                 let _ = self.send(ApplicationCommand::Ready(id));
             }
         }
+        self.waits.interrupt();
     }
 
     fn send(
@@ -559,6 +575,7 @@ fn commands() -> Result<(Commands, Doorbell)> {
             armed: Arc::clone(&armed),
             accepting: Arc::new(Mutex::new(true)),
             sessions: Arc::new(Mutex::new(Sessions::default())),
+            waits: Arc::default(),
         },
         Doorbell { queue: receiver, bell: read, armed },
     ))
@@ -1626,6 +1643,9 @@ fn run_application(
             py,
             definition.invocations,
             definition.counters,
+            definition
+                .orbitals
+                .map(|table| (table, Arc::clone(&commands.waits))),
             #[cfg(feature = "broadcast")]
             definition.broadcast,
             #[cfg(feature = "django")]
@@ -1726,6 +1746,10 @@ fn install_claviron_module(
     py: Python<'_>,
     router: Option<Arc<InvocationRouter>>,
     counters: Option<Arc<claviron::orbit::Counter>>,
+    orbitals: Option<(
+        Arc<claviron::orbit::Orbitals>,
+        Arc<crate::orbital::Waits>,
+    )>,
     #[cfg(feature = "broadcast")] broadcast: Option<
         crate::broadcast::Publisher,
     >,
@@ -1735,7 +1759,8 @@ fn install_claviron_module(
     )>,
 ) -> Result<()> {
     #[allow(unused_mut)]
-    let mut nothing = router.is_none() && counters.is_none();
+    let mut nothing =
+        router.is_none() && counters.is_none() && orbitals.is_none();
     #[cfg(feature = "broadcast")]
     {
         nothing &= broadcast.is_none();
@@ -1778,6 +1803,17 @@ fn install_claviron_module(
             .map_err(|error| python_error(py, error))?;
         module
             .add_class::<crate::counter::PythonCounter>()
+            .map_err(|error| python_error(py, error))?;
+    }
+    if let Some((table, waits)) = orbitals {
+        let orbitals =
+            Py::new(py, crate::orbital::PythonOrbitals::new(table, waits))
+                .map_err(|error| python_error(py, error))?;
+        module
+            .add("orbital", orbitals)
+            .map_err(|error| python_error(py, error))?;
+        module
+            .add_class::<crate::orbital::PythonOrbital>()
             .map_err(|error| python_error(py, error))?;
     }
 

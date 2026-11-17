@@ -138,11 +138,34 @@ feature, a route that names paths is refused when it is prepared.
 
 ## Native Python capabilities
 
-The native Python namespace is `claviron`, including invocation and counters,
-plus optional broadcast, logging and Django Channels capabilities. The
+The native Python namespace is `claviron`, including invocation, counters
+and Orbitals, plus optional broadcast, logging and Django Channels
+capabilities. The
 `broadcast`, `log` and `django` features select their native adapters; the host
 supplies the matching services. They do not install a Python compatibility
 package or change the ASGI protocol.
+
+`claviron.orbital` declares and opens Orbitals: one shared 64-bit value each,
+an `int`, a `float` or a `bool`, in the fleet's shared memory. The object is a
+handle, so every worker that opens the id reads and writes the same value.
+
+```python
+import asyncio
+import claviron
+
+progress = claviron.orbital.int(0)            # or .float(0.0), .bool(False)
+progress.add(1)                               # atomic; the value after
+same = claviron.orbital.open(progress.id)     # in any worker of the fleet
+seen = await asyncio.to_thread(same.wait, 1)  # parks until it is not 1
+```
+
+Creating an Orbital takes a slot for the life of the fleet's table. Nothing is
+released, so declare one for something that lasts, not one per request, and
+share it by passing its id, `<kind>:<slot>:<epoch>` as text. `wait(current)`
+blocks its thread with the GIL released until the value differs from
+`current`; run it off the event loop. It has no timeout: a write ends it, or
+the application stopping does, with `RuntimeError`. An unsigned (`u64:`) id is
+refused.
 
 The module exists only inside the host process. Add this repository's `stubs/`
 directory to your editor's stub search path; it holds type declarations only.

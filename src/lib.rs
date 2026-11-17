@@ -28,6 +28,8 @@ pub mod interpreter;
 #[cfg(feature = "log")]
 mod log;
 #[cfg(feature = "asgi")]
+mod orbital;
+#[cfg(feature = "asgi")]
 pub mod routing;
 #[cfg(feature = "backend")]
 mod service;

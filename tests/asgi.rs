@@ -550,3 +550,64 @@ async fn a_retiring_process_tells_open_and_new_sessions_going_away() {
     let (_late, exchange) = open(&handle);
     assert_eq!(disconnect_code(&exchange), 1001);
 }
+
+/// An Orbital is one place through every handle that opens its id, a wait on
+/// it returns what a write made it, and the stop that retires the
+/// application's sessions ends a wait nothing writes to.
+#[test]
+fn an_orbital_is_shared_by_id_and_a_wait_ends_on_a_write_or_the_stop() {
+    crate::interpreter::initialize(None).unwrap();
+    let fleet = claviron::orbit::Fleet::join("python-orbital-test", 1).unwrap();
+    let table =
+        Arc::new(claviron::orbit::Orbitals::new(Arc::new(fleet)).unwrap());
+    let (commands, _doorbell) = commands().unwrap();
+    Python::attach(|py| {
+        let orbitals = crate::orbital::PythonOrbitals::new(
+            Arc::clone(&table),
+            Arc::clone(&commands.waits),
+        );
+        let scope = PyDict::new(py);
+        scope.set_item("orbital", Py::new(py, orbitals).unwrap()).unwrap();
+        let run = |code: &std::ffi::CStr| {
+            py.run(code, Some(&scope), None)
+                .unwrap_or_else(|error| panic!("{}", python_error(py, error)))
+        };
+        run(c"
+first = orbital.int(0)
+same = orbital.open(first.id)
+assert first.id == same.id and first.id.startswith('i64:')
+assert first.add(2) == 2 and same.get() == 2
+same.set(5)
+assert first.get() == 5
+try:
+    orbital.open('u64:0:1')
+except ValueError:
+    pass
+else:
+    raise AssertionError('an unsigned id was opened')
+");
+        let id: String = scope
+            .get_item("first")
+            .unwrap()
+            .unwrap()
+            .getattr("id")
+            .unwrap()
+            .extract()
+            .unwrap();
+        let writer = table.open::<i64>(id.parse().unwrap()).unwrap();
+        let write = thread::spawn(move || writer.store(7));
+        run(c"assert same.wait(5) == 7");
+        write.join().unwrap();
+
+        let stop = thread::spawn(move || commands.retire_sessions());
+        run(c"
+try:
+    same.wait(7)
+except RuntimeError:
+    pass
+else:
+    raise AssertionError('the wait outlived the stop')
+");
+        stop.join().unwrap();
+    });
+}
