@@ -51,7 +51,7 @@ pub fn initialize(virtual_environment: Option<&Path>) -> Result<()> {
                 venv.join("bin").join("python")
             }
         }
-        None => PathBuf::from(env!("CLAVIRON_PYTHON_EXECUTABLE")),
+        None => installation_executable()?,
     };
     if !executable.is_file() {
         return Err(Error::Python(format!(
@@ -119,6 +119,65 @@ pub fn initialize(virtual_environment: Option<&Path>) -> Result<()> {
         })?;
     }
     Ok(())
+}
+
+/// The interpreter of the installation this process's libpython belongs to.
+///
+/// Found from the library the process actually loaded, the one its rpath
+/// names, so the standard library always matches it, whatever `PATH`, the
+/// working directory or the host binary's location say. Walking up from the
+/// library's directory finds `bin/python3.15` for a prefix layout
+/// (`<prefix>/lib`), a multiarch one (`<prefix>/lib/<triple>`) and a macOS
+/// framework (`Versions/3.15/Python`). A static libpython lives inside the
+/// host binary, so there is no installation to find: it needs a venv.
+#[cfg(unix)]
+fn installation_executable() -> Result<PathBuf> {
+    use std::ffi::{CStr, OsStr};
+    use std::os::unix::ffi::OsStrExt;
+
+    let symbol = pyo3::ffi::Py_InitializeFromConfig as *const libc::c_void;
+    let mut info = std::mem::MaybeUninit::<libc::Dl_info>::zeroed();
+    // SAFETY: dladdr reads the address and fills `info`; it does not retain
+    // the pointer.
+    let found = unsafe { libc::dladdr(symbol, info.as_mut_ptr()) };
+    // SAFETY: zero-initialised, and filled by dladdr when it succeeds.
+    let info = unsafe { info.assume_init() };
+    if found == 0 || info.dli_fname.is_null() {
+        return Err(Error::Python(
+            "cannot locate the loaded libpython; declare a venv".to_owned(),
+        ));
+    }
+    // SAFETY: dladdr returned a NUL-terminated path owned by the loader.
+    let name = unsafe { CStr::from_ptr(info.dli_fname) };
+    let library = PathBuf::from(OsStr::from_bytes(name.to_bytes()));
+    let is_libpython = library.file_name().is_some_and(|file| {
+        let file = file.to_string_lossy();
+        file.starts_with("libpython") || file == "Python"
+    });
+    if !is_libpython {
+        return Err(Error::Python(format!(
+            "libpython is linked statically into {}; declare a venv",
+            library.display()
+        )));
+    }
+    library
+        .ancestors()
+        .skip(1)
+        .map(|directory| directory.join("bin").join("python3.15"))
+        .find(|candidate| candidate.is_file())
+        .ok_or_else(|| {
+            Error::Python(format!(
+                "no bin/python3.15 belongs to the loaded {}; declare a venv",
+                library.display()
+            ))
+        })
+}
+
+#[cfg(not(unix))]
+fn installation_executable() -> Result<PathBuf> {
+    Err(Error::Python(
+        "declare a venv: this platform has no loaded-library lookup".to_owned(),
+    ))
 }
 
 /// Prepare the interpreter for an application before its code is imported:

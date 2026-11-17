@@ -1,16 +1,10 @@
-//! Hand the application's binary the directory of the Python it links.
+//! Validate the CPython this crate is built against.
 //!
-//! The binary that embeds this crate is its host's, and a link argument given
-//! here would not reach it. So the directory travels as `links` metadata
-//! instead: the host's own `build.rs` reads it as
-//! `DEP_CLAVIRON_PYTHON_LIB_DIR` and writes it into its binary as the
-//! rpath.
-//!
-//! Only for a shared libpython; a static one is inside the binary already.
+//! Python is selected the PyO3 way, with `PYO3_PYTHON` or
+//! `PYO3_CONFIG_FILE`. Finding a shared libpython at run time is the host
+//! binary's concern, and PyO3 has the standard tool for it: the host's own
+//! `build.rs` calls `pyo3_build_config::add_libpython_rpath_link_args()`.
 fn main() {
-    println!("cargo:rerun-if-env-changed=PYO3_PYTHON");
-    println!("cargo:rerun-if-env-changed=PYO3_CONFIG_FILE");
-
     let python = pyo3_build_config::get();
     assert_eq!(
         python.implementation(),
@@ -29,13 +23,4 @@ fn main() {
         ),
         "claviron-python uses the selected CPython 3.15 ABI, not a multi-version abi3/abi3t build"
     );
-    let executable = python.executable().expect(
-        "claviron-python requires an explicit interpreter executable; set PYO3_PYTHON or executable in PYO3_CONFIG_FILE",
-    );
-    println!("cargo:rustc-env=CLAVIRON_PYTHON_EXECUTABLE={executable}");
-    if python.shared()
-        && let Some(directory) = python.lib_dir()
-    {
-        println!("cargo:lib_dir={directory}");
-    }
 }

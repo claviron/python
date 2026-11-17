@@ -149,10 +149,26 @@ directory to your editor's stub search path; it holds type declarations only.
 
 ## Building
 
-Select CPython 3.15 with `PYO3_PYTHON` or PyO3 configuration. This package owns
-ABI validation and publishes the shared-library directory to a direct host's
-build script as `DEP_CLAVIRON_PYTHON_LIB_DIR`. The `gufi` runner forwards the
-same directory under its existing `DEP_GUFI_PYTHON_LIB_DIR` key.
+Select CPython 3.15 with `PYO3_PYTHON` or PyO3 configuration; this package
+validates the selected interpreter and its ABI. A host binary linking a shared
+libpython finds it at run time through the rpath its own build script adds, with
+PyO3's standard tool:
+
+```toml
+[build-dependencies]
+pyo3-build-config = { version = "0.30", features = ["resolve-config"] }
+```
+
+```rust
+// build.rs
+fn main() {
+    pyo3_build_config::add_libpython_rpath_link_args();
+}
+```
+
+It reads the same `PYO3_PYTHON` / `PYO3_CONFIG_FILE` selection, so the binary
+loads the libpython it was built against wherever it is started, without
+`LD_LIBRARY_PATH`. A static libpython needs nothing.
 
 Existing engine tests live under `tests/`. The Python driver checks can also
 run directly, without booting a Rust host:
